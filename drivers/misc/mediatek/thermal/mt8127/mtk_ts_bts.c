@@ -685,7 +685,7 @@ static int mtkts_bts_probe(struct platform_device *pdev)
 		entry = proc_create("tzbts_param", S_IRUGO | S_IWUSR | S_IWGRP, 
 				    mtkts_AP_dir, &mtkts_AP_param_fops);
 		if (entry)
-			proc_set_user(entry, 0, 1000);
+			proc_set_user(entry, make_kuid(&init_user_ns, 0), make_kgid(&init_user_ns, 1000));
 	}
 
 	tzone = devm_kzalloc(&pdev->dev, sizeof(*tzone), GFP_KERNEL);

@@ -2267,7 +2267,7 @@ void tcp_v4_handle_retrans_time_by_uid(struct uid_err uid_e)
                 continue;
     
             if(sk->sk_socket){
-                if(SOCK_INODE(sk->sk_socket)->i_uid != skuid)
+                if(__kuid_val(SOCK_INODE(sk->sk_socket)->i_uid) != skuid)
                     continue;
                 else
                     printk("[mmspb] tcp_v4_handle_retrans_time_by_uid socket uid(%d) match!",
@@ -2325,7 +2325,7 @@ restart:
                 continue;
     
             if(sk->sk_socket){
-                if(SOCK_INODE(sk->sk_socket)->i_uid != skuid)
+                if(__kuid_val(SOCK_INODE(sk->sk_socket)->i_uid) != skuid)
                     continue;
                 else
                     printk(KERN_INFO "SIOCKILLSOCK socket uid(%d) match!",

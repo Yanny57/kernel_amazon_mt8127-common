@@ -817,14 +817,14 @@ kalFirmwareOpen (
     current->fsuid = current->fsgid = 0;
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35))
     struct cred *cred = (struct cred *) get_current_cred();
-    orgfsuid = cred->fsuid;
-    orgfsgid = cred->fsgid;
-    cred->fsuid = cred->fsgid = 0;
+    orgfsuid = __kuid_val(cred->fsuid);
+    orgfsgid = __kgid_val(cred->fsgid);
+    cred->fsuid = make_kuid(&init_user_ns, 0); cred->fsgid = make_kgid(&init_user_ns, 0);
 #else
     struct cred *cred = get_task_cred(current);
-    orgfsuid = cred->fsuid;
-    orgfsgid = cred->fsgid;
-    cred->fsuid = cred->fsgid = 0;
+    orgfsuid = __kuid_val(cred->fsuid);
+    orgfsgid = __kgid_val(cred->fsgid);
+    cred->fsuid = make_kuid(&init_user_ns, 0); cred->fsgid = make_kgid(&init_user_ns, 0);
 #endif
 
     ASSERT(prGlueInfo);
@@ -889,8 +889,8 @@ error_open:
     current->fsuid = orgfsuid;
     current->fsgid = orgfsgid;
 #else
-    cred->fsuid = orgfsuid;
-    cred->fsgid = orgfsgid;
+    cred->fsuid = make_kuid(&init_user_ns, orgfsuid);
+    cred->fsgid = make_kgid(&init_user_ns, orgfsgid);
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35))
     put_cred(cred);
     #endif
@@ -934,8 +934,8 @@ kalFirmwareClose (
 #else
             struct cred *cred = get_task_cred(current);
 #endif
-            cred->fsuid = orgfsuid;
-            cred->fsgid = orgfsgid;
+            cred->fsuid = make_kuid(&init_user_ns, orgfsuid);
+            cred->fsgid = make_kgid(&init_user_ns, orgfsgid);
     #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35))
             put_cred(cred);
     #endif

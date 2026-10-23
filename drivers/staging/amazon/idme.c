@@ -245,7 +245,7 @@ void create_idme_proc(void)
 			proc_item[i] = proc_create_data(name, permission, idme_dir, &idme_proc_fops, idme_item_name[i]);
 
 			if (proc_item[i] && access_restrict)
-				proc_set_user(proc_item[i], MAC_SEC_OWNER, 0);
+				proc_set_user(proc_item[i], make_kuid(&init_user_ns, MAC_SEC_OWNER), make_kgid(&init_user_ns, 0));
 		}
 	}
 #if defined(FORD_HVT_DEVICE_ID_DEFAULT)

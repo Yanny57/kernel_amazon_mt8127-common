@@ -1834,9 +1834,9 @@ INT32 wmt_dev_patch_get (
     }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,29))
-    orig_uid = cred->fsuid;
-    orig_gid = cred->fsgid;
-    cred->fsuid = cred->fsgid = 0;
+    orig_uid = __kuid_val(cred->fsuid);
+    orig_gid = __kgid_val(cred->fsgid);
+    cred->fsuid = make_kuid(&init_user_ns, 0); cred->fsgid = make_kgid(&init_user_ns, 0);
 #else
     orig_uid = current->fsuid;
     orig_gid = current->fsgid;
@@ -1850,8 +1850,8 @@ INT32 wmt_dev_patch_get (
     set_fs(orig_fs);
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,29))
-    cred->fsuid = orig_uid;
-    cred->fsgid = orig_gid;
+    cred->fsuid = make_kuid(&init_user_ns, orig_uid);
+    cred->fsgid = make_kgid(&init_user_ns, orig_gid);
 #else
     current->fsuid = orig_uid;
     current->fsgid = orig_gid;

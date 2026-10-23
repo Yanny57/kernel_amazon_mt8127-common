@@ -130,3 +130,8 @@ source "drivers/staging/android/fiq_debugger/Kconfig"
 endif # if ANDROID
 
 endmenu
+
+config ANDROID_BINDER_DEVICES
+    string "Android Binder devices"
+    depends on ANDROID_BINDER_IPC
+    default "binder,hwbinder,vndbinder"
