@@ -625,6 +625,7 @@ static int fib_check_nh(struct fib_config *cfg, struct fib_info *fi,
 		}
 		rcu_read_lock();
 		{
+			struct fib_table *tbl = NULL;
 			struct flowi4 fl4 = {
 				.daddr = nh->nh_gw,
 				.flowi4_scope = cfg->fc_scope + 1,
@@ -634,7 +635,25 @@ static int fib_check_nh(struct fib_config *cfg, struct fib_info *fi,
 			/* It is not necessary, but requires a bit of thinking */
 			if (fl4.flowi4_scope < RT_SCOPE_LINK)
 				fl4.flowi4_scope = RT_SCOPE_LINK;
-			err = fib_lookup(net, &fl4, &res);
+
+			/* Look up the gateway in the table the route is added
+			 * to first (as IPv6 does), so per-network tables like
+			 * Android netd's resolve their own gateways.
+			 */
+			if (cfg->fc_table)
+				tbl = fib_get_table(net, cfg->fc_table);
+
+			if (tbl)
+				err = fib_table_lookup(tbl, &fl4, &res,
+						       FIB_LOOKUP_NOREF);
+
+			/* on error or if no table given do full lookup. This
+			 * is needed for example when nexthops are in the local
+			 * table rather than the given table
+			 */
+			if (!tbl || err)
+				err = fib_lookup(net, &fl4, &res);
+
 			if (err) {
 				rcu_read_unlock();
 				return err;

@@ -114,6 +114,19 @@ static struct early_suspend mt_cpufreq_early_suspend_handler =
 #define DVFS_F3     ( 747500)   // KHz
 #define DVFS_F4     ( 598000)   // KHz
 
+/*****************************************
+* Overclock steps above the stock 1.3GHz (PTP level 0 only).
+* Boot max stays 1.3GHz; raise scaling_max_freq to use them.
+* Each step has its own voltage on PMIC wrapper DVS slot 4,
+* adjustable together with the stock steps through UV_mV_table.
+******************************************/
+#define DVFS_F_OC_0 (1755000)   // KHz
+#define DVFS_OC_SLOT    (4)
+#define DVFS_UV_MIN     (900)   // mV
+#define DVFS_UV_MAX     (1400)  // mV
+#define DVFS_MV_TO_PMIC(mv)   ((((mv) - 700) * 100) / 625)
+#define DVFS_PMIC_TO_MV(code) (700 + ((code) * 625) / 100)
+
 #if defined(HQA_LV_1_09V)
     #define DVFS_V0     (1200)  // mV
     #define DVFS_V1     (1150)  // mV
@@ -205,6 +218,17 @@ static bool g_cpufreq_get_vcore_corner = false;
 /* pmic volt by PTP-OD */
 static unsigned int mt_cpufreq_pmic_volt[8] = {0};
 
+/* Overclock / undervolt state */
+static bool g_volt_is_oc = false;           /* voltage currently on the OC slot */
+static unsigned int g_ptp_raw_volt[4];      /* PTP-OD (or default) codes for slots 0-3 */
+static bool g_ptp_raw_valid = false;
+static int g_uv_offset_mv[4] = {0};         /* user offset on top of PTP, slots 0-3 */
+
+static inline bool mt_cpufreq_freq_is_oc(unsigned int khz)
+{
+    return g_cpufreq_get_ptp_level == 0 && khz > DVFS_F0;
+}
+
 #ifdef MT_DVFS_PTPOD_TEST
 static unsigned int mt_cpufreq_ptpod_test[8] = {0};
 #endif
@@ -266,6 +290,11 @@ static struct mt_cpu_freq_info mt8127_freqs_e1[] = {
 };
 #else /* Normal case */
 static struct mt_cpu_freq_info mt8127_freqs_e1[] = {
+    OP(DVFS_F_OC_0, 1400),
+    OP(DVFS_F0_1, 1375),
+    OP(DVFS_F0_2, 1350),
+    OP(DVFS_F0_3, 1325),
+    OP(DVFS_F0_4, 1300),
     OP(DVFS_F0, DVFS_V0),
     OP(DVFS_F1, DVFS_V1),
     OP(DVFS_F2, DVFS_V2),
@@ -561,6 +590,18 @@ static unsigned int mt_cpufreq_volt_to_pmic_wrap(unsigned int target_volt)
 }
 #endif
 
+/* PTP code for a stock DVS slot plus the user offset, clamped */
+static unsigned int mt_cpufreq_uv_apply(int slot, unsigned int code)
+{
+    int mv = DVFS_PMIC_TO_MV(code) + g_uv_offset_mv[slot];
+
+    if (mv < DVFS_UV_MIN)
+        mv = DVFS_UV_MIN;
+    if (mv > DVFS_UV_MAX)
+        mv = DVFS_UV_MAX;
+    return DVFS_MV_TO_PMIC(mv);
+}
+
 /* Set voltage because PTP-OD modified voltage table by PMIC wrapper */
 unsigned int mt_cpufreq_voltage_set_by_ptpod(unsigned int pmic_volt[], unsigned int array_size)
 {
@@ -577,10 +618,20 @@ unsigned int mt_cpufreq_voltage_set_by_ptpod(unsigned int pmic_volt[], unsigned 
 	
     spin_lock_irqsave(&mt_cpufreq_lock, flags);
 
-    /* Update voltage setting by PTPOD request. */
+    /* Update voltage setting by PTPOD request, with the user undervolt offsets. */
+    for (i = 0; i < 4 && i < array_size; i++)
+        g_ptp_raw_volt[i] = pmic_volt[i];
+    g_ptp_raw_valid = true;
+
     for (i = 0; i < array_size; i++)
     {
-        mt_cpufreq_reg_write(pmic_volt[i], PMIC_WRAP_DVFS_WDATA_array[i]);
+        unsigned int code = pmic_volt[i];
+
+        if (i < 4)
+            code = mt_cpufreq_uv_apply(i, code);
+        if (i == DVFS_OC_SLOT)
+            continue;   /* owned by the overclock steps */
+        mt_cpufreq_reg_write(code, PMIC_WRAP_DVFS_WDATA_array[i]);
     }
 
     /* For SPM voltage setting in deep idle.*/
@@ -609,7 +660,9 @@ unsigned int mt_cpufreq_voltage_set_by_ptpod(unsigned int pmic_volt[], unsigned 
 	
     for (i = 0; i < array_size; i++)
     {
-        mt_cpufreq_pmic_volt[i] = pmic_volt[i];
+        if (i == DVFS_OC_SLOT)
+            continue;
+        mt_cpufreq_pmic_volt[i] = (i < 4) ? mt_cpufreq_uv_apply(i, pmic_volt[i]) : pmic_volt[i];
         dprintk("mt_cpufreq_pmic_volt[%d] = %x\n", i, mt_cpufreq_pmic_volt[i]);
     }
 
@@ -650,16 +703,20 @@ EXPORT_SYMBOL(mt_cpufreq_voltage_set_by_ptpod);
 unsigned int mt_cpufreq_max_frequency_by_DVS(unsigned int num)
 {
     int voltage_change_num = 0;
-	int i = 0;
+	int i = 0, base = 0;
+
+    /* PTP-OD only handles the stock steps, skip the overclock ones */
+    while (base < mt_cpu_freqs_num - 1 && mt_cpufreq_freq_is_oc(mt_cpu_freqs[base].cpufreq_khz))
+        base++;
 	
     /* Assume mt8127_freqs_e1 voltage will be put in order, and freq will be put from high to low.*/
     if(num == voltage_change_num)
     {
-        xlog_printk(ANDROID_LOG_INFO, "Power/DVFS", "PTPOD0:num = %d, frequency= %d\n", num, mt_cpu_freqs[0].cpufreq_khz);
-        return mt_cpu_freqs[0].cpufreq_khz;	
+        xlog_printk(ANDROID_LOG_INFO, "Power/DVFS", "PTPOD0:num = %d, frequency= %d\n", num, mt_cpu_freqs[base].cpufreq_khz);
+        return mt_cpu_freqs[base].cpufreq_khz;	
     }
 	
-    for (i = 1; i < mt_cpu_freqs_num; i++)
+    for (i = base + 1; i < mt_cpu_freqs_num; i++)
     {
         if(mt_cpu_freqs[i].cpufreq_volt != mt_cpu_freqs[i-1].cpufreq_volt)
             voltage_change_num++;
@@ -1028,6 +1085,18 @@ static void mt_cpu_clock_switch(unsigned int sel)
 /* Need sync with mt_cpufreq_volt_to_pmic_wrap(), mt_cpufreq_pdrv_probe() */
 static void mt_cpufreq_volt_set(unsigned int target_volt)
 {
+    /* Overclock steps carry their own voltage on the OC slot */
+    if (g_volt_is_oc)
+    {
+        unsigned int code = DVFS_MV_TO_PMIC(target_volt);
+
+        mt_cpufreq_reg_write(code, PMIC_WRAP_DVFS_WDATA4);
+        mt_cpufreq_pmic_volt[DVFS_OC_SLOT] = code;
+        dprintk("switch to OC slot: %d mV\n", target_volt);
+        spm_dvfs_ctrl_volt(DVFS_OC_SLOT);
+        return;
+    }
+
 #if 0
     switch (target_volt)
     {
@@ -1196,6 +1265,7 @@ static void mt_cpufreq_set(unsigned int freq_old, unsigned int freq_new, unsigne
     if (freq_new > freq_old)
     {
         #ifdef MT_BUCK_ADJUST
+        g_volt_is_oc = mt_cpufreq_freq_is_oc(freq_new);
         mt_cpufreq_volt_set(target_volt);
         udelay(PMIC_SETTLE_TIME);
         #endif
@@ -1259,6 +1329,7 @@ static void mt_cpufreq_set(unsigned int freq_old, unsigned int freq_new, unsigne
         #endif
 		
         #ifdef MT_BUCK_ADJUST
+        g_volt_is_oc = mt_cpufreq_freq_is_oc(freq_new);
         mt_cpufreq_volt_set(target_volt);
         #endif
     }
@@ -1650,11 +1721,122 @@ static int mt_cpufreq_init(struct cpufreq_policy *policy)
         return ret;
     }
 
+    /* Overclock steps are opt-in: cpuinfo max covers them, default max stays stock */
+    policy->max = g_max_freq_by_ptp;
+
     return 0;
 }
 
+/************************************************
+* UV_mV_table (SmartPack / Kernel Adiutor CPU voltage)
+* read : "<MHz>mhz: <mV> mV" per step, highest first
+* write: one mV value per step, same order
+* Stock steps are an offset on top of PTP-OD per DVS slot,
+* overclock steps are absolute.
+*************************************************/
+static int mt_cpufreq_volt_to_slot(unsigned int volt)
+{
+    if (volt == DVFS_V0)
+        return 0;
+    if (volt == DVFS_V1)
+        return 1;
+    if (volt == DVFS_V2)
+        return 2;
+    #ifdef MT_DVFS_LOW_VOLTAGE_SUPPORT
+    if (volt == DVFS_V3)
+        return 3;
+    #endif
+    return 2;
+}
+
+static unsigned int mt_cpufreq_step_mv(int i)
+{
+    if (mt_cpufreq_freq_is_oc(mt_cpu_freqs[i].cpufreq_khz))
+        return mt_cpu_freqs[i].cpufreq_volt;
+    return DVFS_PMIC_TO_MV(mt_cpufreq_pmic_volt[mt_cpufreq_volt_to_slot(mt_cpu_freqs[i].cpufreq_volt)]);
+}
+
+static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+    ssize_t len = 0;
+    int i;
+
+    for (i = 0; i < mt_cpu_freqs_num; i++)
+        len += sprintf(buf + len, "%umhz: %u mV\n",
+                       mt_cpu_freqs[i].cpufreq_khz / 1000, mt_cpufreq_step_mv(i));
+    return len;
+}
+
+static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, const char *buf, size_t count)
+{
+    const unsigned int PMIC_WRAP_DVFS_WDATA_array[4] = {PMIC_WRAP_DVFS_WDATA0, PMIC_WRAP_DVFS_WDATA1,
+                                                         PMIC_WRAP_DVFS_WDATA2, PMIC_WRAP_DVFS_WDATA3};
+    int want[4] = {0, 0, 0, 0};
+    unsigned long flags;
+    const char *p = buf;
+    int i, n, mv, slot;
+
+    if (!mt_cpu_freqs)
+        return -ENODEV;
+
+    for (i = 0; i < mt_cpu_freqs_num; i++)
+    {
+        if (sscanf(p, "%d%n", &mv, &n) != 1)
+            return -EINVAL;
+        p += n;
+        if (mv < DVFS_UV_MIN || mv > DVFS_UV_MAX)
+            return -EINVAL;
+
+        if (mt_cpufreq_freq_is_oc(mt_cpu_freqs[i].cpufreq_khz))
+        {
+            mt_cpu_freqs[i].cpufreq_volt = mv;
+            continue;
+        }
+        /* Steps sharing a DVS slot get the highest requested voltage */
+        slot = mt_cpufreq_volt_to_slot(mt_cpu_freqs[i].cpufreq_volt);
+        if (mv > want[slot])
+            want[slot] = mv;
+    }
+
+    spin_lock_irqsave(&mt_cpufreq_lock, flags);
+
+    if (!g_ptp_raw_valid)
+    {
+        for (slot = 0; slot < 4; slot++)
+            g_ptp_raw_volt[slot] = mt_cpufreq_pmic_volt[slot];
+        g_ptp_raw_valid = true;
+    }
+
+    for (slot = 0; slot < 4; slot++)
+    {
+        if (want[slot] == 0)
+            continue;
+        g_uv_offset_mv[slot] = want[slot] - DVFS_PMIC_TO_MV(g_ptp_raw_volt[slot]);
+        mt_cpufreq_pmic_volt[slot] = mt_cpufreq_uv_apply(slot, g_ptp_raw_volt[slot]);
+        mt_cpufreq_reg_write(mt_cpufreq_pmic_volt[slot], PMIC_WRAP_DVFS_WDATA_array[slot]);
+    }
+
+    /* Re-apply the current step so a change to it takes effect now */
+    for (i = 0; i < mt_cpu_freqs_num; i++)
+    {
+        if (mt_cpu_freqs[i].cpufreq_khz == g_cur_freq)
+        {
+            g_cur_cpufreq_volt = mt_cpu_freqs[i].cpufreq_volt;
+            break;
+        }
+    }
+    mt_cpufreq_volt_set(g_cur_cpufreq_volt);
+
+    spin_unlock_irqrestore(&mt_cpufreq_lock, flags);
+
+    return count;
+}
+
+cpufreq_freq_attr_rw(UV_mV_table);
+
 static struct freq_attr *mt_cpufreq_attr[] = {
     &cpufreq_freq_attr_scaling_available_freqs,
+    &UV_mV_table,
     NULL,
 };
 

@@ -66,6 +66,8 @@ static struct vfsmount *shm_mnt;
 #include <linux/highmem.h>
 #include <linux/seq_file.h>
 #include <linux/magic.h>
+#include <linux/syscalls.h>
+#include <uapi/linux/memfd.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -612,6 +614,12 @@ static int shmem_setattr(struct dentry *dentry, struct iattr *attr)
 	if (S_ISREG(inode->i_mode) && (attr->ia_valid & ATTR_SIZE)) {
 		loff_t oldsize = inode->i_size;
 		loff_t newsize = attr->ia_size;
+		struct shmem_inode_info *info = SHMEM_I(inode);
+
+		/* protected by i_mutex */
+		if ((newsize < oldsize && (info->seals & F_SEAL_SHRINK)) ||
+		    (newsize > oldsize && (info->seals & F_SEAL_GROW)))
+			return -EPERM;
 
 		if (newsize != oldsize) {
 			i_size_write(inode, newsize);
@@ -1426,6 +1434,15 @@ out_nomem:
 
 static int shmem_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	struct shmem_inode_info *info = SHMEM_I(file_inode(file));
+
+	if ((info->seals & F_SEAL_WRITE) && (vma->vm_flags & VM_SHARED)) {
+		if (vma->vm_flags & VM_WRITE)
+			return -EPERM;
+		/* and keep mprotect() from making it writable later */
+		vma->vm_flags &= ~VM_MAYWRITE;
+	}
+
 	file_accessed(file);
 	vma->vm_ops = &shmem_vm_ops;
 	return 0;
@@ -1454,6 +1471,7 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 		info = SHMEM_I(inode);
 		memset(info, 0, (char *)inode - (char *)info);
 		spin_lock_init(&info->lock);
+		info->seals = F_SEAL_SEAL;
 		info->flags = flags & VM_NORESERVE;
 		if (atomic_copy)
 			inode->i_flags |= S_ATOMIC_COPY;
@@ -1509,7 +1527,17 @@ shmem_write_begin(struct file *file, struct address_space *mapping,
 			struct page **pagep, void **fsdata)
 {
 	struct inode *inode = mapping->host;
+	struct shmem_inode_info *info = SHMEM_I(inode);
 	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
+
+	/* i_mutex is held by caller */
+	if (unlikely(info->seals)) {
+		if (info->seals & F_SEAL_WRITE)
+			return -EPERM;
+		if ((info->seals & F_SEAL_GROW) && pos + len > inode->i_size)
+			return -EPERM;
+	}
+
 	return shmem_getpage(inode, index, pagep, SGP_WRITE, NULL);
 }
 
@@ -1899,6 +1927,12 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 		loff_t unmap_end = round_down(offset + len, PAGE_SIZE) - 1;
 		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(shmem_falloc_waitq);
 
+		/* protected by i_mutex */
+		if (SHMEM_I(inode)->seals & F_SEAL_WRITE) {
+			error = -EPERM;
+			goto out;
+		}
+
 		shmem_falloc.waitq = &shmem_falloc_waitq;
 		shmem_falloc.start = unmap_start >> PAGE_SHIFT;
 		shmem_falloc.next = (unmap_end + 1) >> PAGE_SHIFT;
@@ -1924,6 +1958,11 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 	error = inode_newsize_ok(inode, offset + len);
 	if (error)
 		goto out;
+
+	if ((SHMEM_I(inode)->seals & F_SEAL_GROW) && offset + len > inode->i_size) {
+		error = -EPERM;
+		goto out;
+	}
 
 	start = offset >> PAGE_CACHE_SHIFT;
 	end = (offset + len + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
@@ -2644,6 +2683,158 @@ static int shmem_show_options(struct seq_file *seq, struct dentry *root)
 				from_kgid_munged(&init_user_ns, sbinfo->gid));
 	shmem_show_mpol(seq, sbinfo->mpol);
 	return 0;
+}
+
+/*
+ * Sealing and memfd_create(), backported from Linux 3.17.
+ *
+ * Unlike upstream, F_SEAL_WRITE does not wait for in-flight GUP pins
+ * (shmem_wait_for_pins) and refuses any VM_SHARED mapping instead of only
+ * writable ones, since 3.10's i_mmap_writable counts all shared mappings.
+ */
+#define F_ALL_SEALS (F_SEAL_SEAL | \
+		     F_SEAL_SHRINK | \
+		     F_SEAL_GROW | \
+		     F_SEAL_WRITE)
+
+static int shmem_add_seals(struct file *file, unsigned int seals)
+{
+	struct inode *inode = file_inode(file);
+	struct shmem_inode_info *info = SHMEM_I(inode);
+	struct address_space *mapping = file->f_mapping;
+	int error;
+
+	if (file->f_op != &shmem_file_operations)
+		return -EINVAL;
+	if (!(file->f_mode & FMODE_WRITE))
+		return -EPERM;
+	if (seals & ~(unsigned int)F_ALL_SEALS)
+		return -EINVAL;
+
+	mutex_lock(&inode->i_mutex);
+
+	if (info->seals & F_SEAL_SEAL) {
+		error = -EPERM;
+		goto unlock;
+	}
+
+	if ((seals & F_SEAL_WRITE) && !(info->seals & F_SEAL_WRITE)) {
+		mutex_lock(&mapping->i_mmap_mutex);
+		error = mapping->i_mmap_writable ? -EBUSY : 0;
+		if (!error)
+			info->seals |= F_SEAL_WRITE;
+		mutex_unlock(&mapping->i_mmap_mutex);
+		if (error)
+			goto unlock;
+	}
+
+	info->seals |= seals;
+	error = 0;
+
+unlock:
+	mutex_unlock(&inode->i_mutex);
+	return error;
+}
+
+static int shmem_get_seals(struct file *file)
+{
+	if (file->f_op != &shmem_file_operations)
+		return -EINVAL;
+
+	return SHMEM_I(file_inode(file))->seals;
+}
+
+long shmem_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	long error;
+
+	switch (cmd) {
+	case F_ADD_SEALS:
+		/* disallow upper 32bit */
+		if (arg > UINT_MAX)
+			return -EINVAL;
+
+		error = shmem_add_seals(file, arg);
+		break;
+	case F_GET_SEALS:
+		error = shmem_get_seals(file);
+		break;
+	default:
+		error = -EINVAL;
+		break;
+	}
+
+	return error;
+}
+
+#define MFD_NAME_PREFIX "memfd:"
+#define MFD_NAME_PREFIX_LEN (sizeof(MFD_NAME_PREFIX) - 1)
+#define MFD_NAME_MAX_LEN (NAME_MAX - MFD_NAME_PREFIX_LEN)
+
+#define MFD_ALL_FLAGS (MFD_CLOEXEC | MFD_ALLOW_SEALING)
+
+SYSCALL_DEFINE2(memfd_create,
+		const char __user *, uname,
+		unsigned int, flags)
+{
+	struct shmem_inode_info *info;
+	struct file *file;
+	int fd, error;
+	char *name;
+	long len;
+
+	if (flags & ~(unsigned int)MFD_ALL_FLAGS)
+		return -EINVAL;
+
+	/* length includes terminating zero */
+	len = strnlen_user(uname, MFD_NAME_MAX_LEN + 1);
+	if (len <= 0)
+		return -EFAULT;
+	if (len > MFD_NAME_MAX_LEN + 1)
+		return -EINVAL;
+
+	name = kmalloc(len + MFD_NAME_PREFIX_LEN, GFP_TEMPORARY);
+	if (!name)
+		return -ENOMEM;
+
+	strcpy(name, MFD_NAME_PREFIX);
+	if (copy_from_user(&name[MFD_NAME_PREFIX_LEN], uname, len)) {
+		error = -EFAULT;
+		goto err_name;
+	}
+
+	/* terminating-zero may have changed after strnlen_user() returned */
+	if (name[len + MFD_NAME_PREFIX_LEN - 1]) {
+		error = -EFAULT;
+		goto err_name;
+	}
+
+	fd = get_unused_fd_flags((flags & MFD_CLOEXEC) ? O_CLOEXEC : 0);
+	if (fd < 0) {
+		error = fd;
+		goto err_name;
+	}
+
+	file = shmem_file_setup(name, 0, VM_NORESERVE, 0);
+	if (IS_ERR(file)) {
+		error = PTR_ERR(file);
+		goto err_fd;
+	}
+	info = SHMEM_I(file_inode(file));
+	file->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+	file->f_flags |= O_RDWR | O_LARGEFILE;
+	if (flags & MFD_ALLOW_SEALING)
+		info->seals &= ~F_SEAL_SEAL;
+
+	fd_install(fd, file);
+	kfree(name);
+	return fd;
+
+err_fd:
+	put_unused_fd(fd);
+err_name:
+	kfree(name);
+	return error;
 }
 #endif /* CONFIG_TMPFS */
 
