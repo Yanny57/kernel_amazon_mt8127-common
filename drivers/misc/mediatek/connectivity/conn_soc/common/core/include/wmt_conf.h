@@ -33,7 +33,8 @@
 ********************************************************************************
 */
 #define CUST_CFG_WMT "WMT_SOC.cfg"
-#define CUST_CFG_WMT_PREFIX "/system/etc/firmware/"
+/* ford: firmware moved to the vendor partition (Treble) */
+#define CUST_CFG_WMT_PREFIX "/vendor/odm/firmware/"
 
 /*******************************************************************************
 *                    E X T E R N A L   R E F E R E N C E S

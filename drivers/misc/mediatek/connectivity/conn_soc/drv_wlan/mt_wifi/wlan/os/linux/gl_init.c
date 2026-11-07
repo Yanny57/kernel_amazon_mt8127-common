@@ -3426,7 +3426,7 @@ wlanProbe(
 							pucConfigBuf, WLAN_CFG_FILE_BUF_SIZE, &u4ConfigReadLen) == 0){
 					printk(KERN_ERR "CFG_FILE: Read /data/misc/wifi/wifi.cfg \n");
 				}
-				else if(kalReadToFile("/etc/firmware/wifi.cfg", 
+				else if(kalReadToFile("/odm/firmware/wifi.cfg", 
 							pucConfigBuf, WLAN_CFG_FILE_BUF_SIZE, &u4ConfigReadLen) == 0){
 					printk(KERN_ERR "CFG_FILE: Read /etc/firmware/wifi.cfg \n");
 				}
