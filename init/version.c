@@ -11,6 +11,15 @@
 #include <linux/uts.h>
 #include <linux/utsname.h>
 #include <generated/utsrelease.h>
+
+/*
+ * uname() reports 3.18 so Android 10 userspace that gates memfd_create() on the
+ * release string (ART's dual-view JIT, which system_server requires) uses the
+ * backported syscall. Only the runtime release changes: LINUX_VERSION_CODE,
+ * module vermagic and /proc/version keep the real 3.10. Every other Q release
+ * check (membarrier, bpf, overlayfs need 4.x) still sees an old kernel.
+ */
+#define UTS_RELEASE_SPOOF "3.18.0-" UTS_RELEASE
 #include <linux/version.h>
 #include <linux/proc_ns.h>
 
@@ -29,7 +38,7 @@ struct uts_namespace init_uts_ns = {
 	.name = {
 		.sysname	= UTS_SYSNAME,
 		.nodename	= UTS_NODENAME,
-		.release	= UTS_RELEASE,
+		.release	= UTS_RELEASE_SPOOF,
 		.version	= UTS_VERSION,
 		.machine	= UTS_MACHINE,
 		.domainname	= UTS_DOMAINNAME,
