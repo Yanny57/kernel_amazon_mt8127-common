@@ -1563,7 +1563,8 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 			fd_array = (u32 *)(uintptr_t)
 				(parent_buffer + fda->parent_offset);
 			for (fd_index = 0; fd_index < fda->num_fds; fd_index++)
-				task_close_fd(proc, fd_array[fd_index]);
+				if ((int)fd_array[fd_index] >= 0)
+					task_close_fd(proc, fd_array[fd_index]);
 		} break;
 		default:
 			pr_err("transaction release %d bad object type %x\n",
@@ -1772,6 +1773,13 @@ static int binder_translate_fd_array(struct binder_fd_array_object *fda,
 		return -EINVAL;
 	}
 	for (fdi = 0; fdi < fda->num_fds; fdi++) {
+		/*
+		 * Native handles may hold unused fd slots set to -1 (legacy Mali
+		 * gralloc framebuffer handles leave share_fd at -1). Pass those
+		 * through instead of failing the whole transaction.
+		 */
+		if ((int)fd_array[fdi] < 0)
+			continue;
 		target_fd = binder_translate_fd(fd_array[fdi], t, thread,
 						in_reply_to);
 		if (target_fd < 0)
@@ -1787,7 +1795,8 @@ err_translate_fd_failed:
 	 */
 	num_installed_fds = fdi;
 	for (fdi = 0; fdi < num_installed_fds; fdi++)
-		task_close_fd(target_proc, fd_array[fdi]);
+		if ((int)fd_array[fdi] >= 0)
+			task_close_fd(target_proc, fd_array[fdi]);
 	return target_fd;
 }
 
