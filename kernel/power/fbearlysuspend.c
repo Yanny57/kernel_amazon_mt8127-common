@@ -30,18 +30,18 @@ static enum {
 /* tell userspace to stop drawing, wait for it to stop */
 static void stop_drawing_early_suspend(struct early_suspend *h)
 {
-	int ret;
 	unsigned long irq_flags;
 
+	/*
+	 * Early suspend now runs after userspace has already powered the
+	 * display off, and nothing reads wait_for_fb_sleep any more, so do not
+	 * stall the suspend workqueue for a second waiting for an ack.
+	 */
 	spin_lock_irqsave(&fb_state_lock, irq_flags);
-	fb_state = FB_STATE_REQUEST_STOP_DRAWING;
+	fb_state = FB_STATE_STOPPED_DRAWING;
 	spin_unlock_irqrestore(&fb_state_lock, irq_flags);
 
 	wake_up_all(&fb_state_wq);
-	ret = wait_event_timeout(fb_state_wq, fb_state == FB_STATE_STOPPED_DRAWING, HZ);
-	if (unlikely(fb_state != FB_STATE_STOPPED_DRAWING))
-		pr_warn("stop_drawing_early_suspend: timeout waiting for "
-			   "userspace to stop drawing\n");
 }
 
 /* tell userspace to start drawing */

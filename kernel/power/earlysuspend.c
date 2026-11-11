@@ -164,16 +164,11 @@ static void early_suspend(struct work_struct *work)
 	/* Remove sys_sync from early_suspend, and use work queue to complete sys_sync */
 
  abort:
-	if (state == SUSPEND_REQUESTED_AND_SUSPENDED) {
-		/* wake_unlock(&main_wake_lock); */
-#ifdef CONFIG_MTK_HIBERNATION
-		suspend_state_t susp_state = get_suspend_state();
-		pm_warn("calling pm_autosleep_set_state() with parameter: %d\n", susp_state);
-		pm_autosleep_set_state(susp_state);
-#else
-		pm_autosleep_set_state(PM_SUSPEND_MEM);
-#endif
-	}
+	/*
+	 * Do not switch kernel autosleep on here: suspend is driven by
+	 * userspace writing "mem" to /sys/power/state (see state_store()).
+	 */
+	return;
 }
 
 static void late_resume(struct work_struct *work)
@@ -279,6 +274,19 @@ void request_suspend_state(suspend_state_t new_state)
 		wait_for_completion(&fb_drv_ready);
 		pr_warn("wait done\n");
 	}
+}
+
+void early_suspend_display_power(bool on)
+{
+	request_suspend_state(on ? PM_SUSPEND_ON : PM_SUSPEND_MEM);
+}
+EXPORT_SYMBOL(early_suspend_display_power);
+
+/* Wait for a queued early suspend / late resume to finish. */
+void early_suspend_flush(void)
+{
+	if (suspend_work_queue)
+		flush_workqueue(suspend_work_queue);
 }
 
 suspend_state_t get_suspend_state(void)

@@ -18,6 +18,7 @@
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
 #include <linux/list.h>
+#include <linux/types.h>
 #endif
 
 /* The early_suspend structure defines suspend and resume hooks to be called
@@ -47,9 +48,15 @@ struct early_suspend {
 #ifdef CONFIG_HAS_EARLYSUSPEND
 void register_early_suspend(struct early_suspend *handler);
 void unregister_early_suspend(struct early_suspend *handler);
+/*
+ * Called by the display driver when userspace powers the panel off/on.
+ * Runs the early-suspend (on == false) or late-resume (on == true) handlers.
+ */
+void early_suspend_display_power(bool on);
 #else
 #define register_early_suspend(handler) do { } while (0)
 #define unregister_early_suspend(handler) do { } while (0)
+#define early_suspend_display_power(on) do { } while (0)
 #endif
 
 #endif

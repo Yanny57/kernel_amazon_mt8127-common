@@ -451,9 +451,28 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
     }
     if (state < PM_SUSPEND_MAX && *s) {
 #ifdef CONFIG_EARLYSUSPEND
-        if (state == PM_SUSPEND_ON || valid_state(state)) {
+        /*
+         * Android 10+ (SystemSuspend) tracks wakelocks in userspace and
+         * expects a write of "mem" to suspend once, synchronously, guarded
+         * by wakeup_count. The old behaviour (run the early-suspend
+         * handlers and leave kernel autosleep on) made the kernel suspend
+         * behind userspace's back whenever no kernel wakelock was held.
+         * Early suspend / late resume now follow the display power state
+         * (MTKFB_POWEROFF / MTKFB_POWERON).
+         */
+        if (state == PM_SUSPEND_ON) {
             error = 0;
-            request_suspend_state(state);
+        } else if (valid_state(state)) {
+            error = pm_autosleep_lock();
+            if (!error) {
+                if (pm_autosleep_state() > PM_SUSPEND_ON) {
+                    error = -EBUSY;
+                } else {
+                    early_suspend_flush();
+                    error = pm_suspend(state);
+                }
+                pm_autosleep_unlock();
+            }
         } else
             error = -EINVAL;
 #else

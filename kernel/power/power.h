@@ -385,6 +385,7 @@ static inline suspend_state_t pm_autosleep_state(void) { return PM_SUSPEND_ON; }
 #ifdef CONFIG_EARLYSUSPEND
 /* kernel/power/earlysuspend.c */
 void request_suspend_state(suspend_state_t state);
+void early_suspend_flush(void);
 suspend_state_t get_suspend_state(void);
 //[MTK]
 extern void suspend_syssync_enqueue(void) ;

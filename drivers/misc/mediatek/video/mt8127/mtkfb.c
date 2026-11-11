@@ -2385,6 +2385,7 @@ static int mtkfb_ioctl(struct file *file, struct fb_info *info, unsigned int cmd
 			ret = wait_event_interruptible_timeout(suspend_done_wq, is_early_suspended_done, HZ/10);
 			is_early_suspended_done = FALSE;
             printk("[MTKFB_POWEROFF] ret, already early_suspended\n");
+            early_suspend_display_power(false);
             return r;
 		}
 		is_early_suspended_done = FALSE;
@@ -2460,6 +2461,9 @@ static int mtkfb_ioctl(struct file *file, struct fb_info *info, unsigned int cmd
 
         up(&sem_early_suspend);
 
+        /* The panel is off: run the screen-off (early suspend) handlers. */
+        early_suspend_display_power(false);
+
         return r;
     }
 
@@ -2476,6 +2480,7 @@ static int mtkfb_ioctl(struct file *file, struct fb_info *info, unsigned int cmd
 		{
 			up(&sem_early_suspend);
             printk("[FB driver] MTKFB_POWERON ioctl,device had been resumed\n");
+            early_suspend_display_power(true);
 			return r;
         }
         disp_path_clock_on("mtkfb");
@@ -2498,6 +2503,9 @@ static int mtkfb_ioctl(struct file *file, struct fb_info *info, unsigned int cmd
 
         MMProfileLog(MTKFB_MMP_Events.EarlySuspend, MMProfileFlagEnd);
         up(&sem_early_suspend);
+
+        /* The panel is back on: run the screen-on (late resume) handlers. */
+        early_suspend_display_power(true);
 
         return r;
     }
