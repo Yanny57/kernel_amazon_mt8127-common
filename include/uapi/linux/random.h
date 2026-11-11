@@ -34,6 +34,15 @@
 /* Clear the entropy pool and associated counters.  (Superuser only.) */
 #define RNDCLEARPOOL	_IO( 'R', 0x06 )
 
+/*
+ * Flags for getrandom(2)
+ *
+ * GRND_NONBLOCK	Don't block and return EAGAIN instead
+ * GRND_RANDOM		Use the /dev/random pool instead of /dev/urandom
+ */
+#define GRND_NONBLOCK	0x0001
+#define GRND_RANDOM	0x0002
+
 struct rand_pool_info {
 	int	entropy_count;
 	int	buf_size;
