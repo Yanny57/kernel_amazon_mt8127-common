@@ -1156,6 +1156,12 @@ int neigh_update(struct neighbour *neigh, const u8 *lladdr, u8 new,
 
 	if (new != old) {
 		neigh_del_timer(neigh);
+		/* Userspace (e.g. Android's IpReachabilityMonitor) may request a
+		 * probe; start a fresh round of unicast probes instead of failing
+		 * immediately on a stale probe count (upstream 765c9c639).
+		 */
+		if (new & NUD_PROBE)
+			atomic_set(&neigh->probes, 0);
 		if (new & NUD_IN_TIMER)
 			neigh_add_timer(neigh, (jiffies +
 						((new & NUD_REACHABLE) ?
