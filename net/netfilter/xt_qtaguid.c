@@ -1750,10 +1750,16 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	if (filp == NULL) {
 		MT_DEBUG("qtaguid[%d]: leaving filp=NULL\n", par->hooknum);
 		account_for_uid(skb, sk, 0, par);
+		/*
+		 * Kernel sockets (ndisc, icmp, tcp ctl) have no file and thus
+		 * no owner: they must not match --uid-owner/--gid-owner.
+		 * The vendor forced a match here, which made every netd
+		 * "-m owner --uid-owner <app> -j DROP" rule (fw_standby etc.)
+		 * drop all kernel generated packets, e.g. IPv6 neighbour
+		 * solicitations/advertisements.
+		 */
 		res = ((info->match ^ info->invert) &
 			(XT_QTAGUID_UID | XT_QTAGUID_GID)) == 0;
-		/*mtk_net: patch for duplicated account for uid 0*/
-		res = true;
 		atomic64_inc(&qtu_events.match_no_sk_file);
 		goto put_sock_ret_res;
 	}
