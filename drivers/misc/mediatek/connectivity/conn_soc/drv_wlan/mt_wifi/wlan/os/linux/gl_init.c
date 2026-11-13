@@ -2751,7 +2751,9 @@ wlanNetDestroy(
 } /* end of wlanNetDestroy() */
 
 #ifndef CONFIG_X86
-UINT_8 g_aucBufIpAddr[64] = {0};
+/* IPv4 + up to WLAN_SUSPEND_MAX_IPV6 IPv6 entries for the suspend filter */
+#define WLAN_SUSPEND_MAX_IPV6	3
+UINT_8 g_aucBufIpAddr[128] = {0};
 static void wlanNotifyFwSuspend(P_GLUE_INFO_T prGlueInfo, BOOLEAN fgSuspend)
 {
 	WLAN_STATUS rStatus = WLAN_STATUS_FAILURE;
@@ -2778,7 +2780,7 @@ void wlanHandleSystemSuspend(void)
     UINT_8  ip[4] = { 0 };
     UINT_32 u4NumIPv4 = 0;
 #ifdef  CONFIG_IPV6
-    UINT_8  ip6[16] = { 0 };     // FIX ME: avoid to allocate large memory in stack
+    UINT_8  aucIp6[WLAN_SUSPEND_MAX_IPV6][16];
     UINT_32 u4NumIPv6 = 0;
 	P_PARAM_NETWORK_ADDRESS_IPV6 prParamIpv6Addr;
 #endif
@@ -2833,28 +2835,24 @@ void wlanHandleSystemSuspend(void)
 		DBGLOG(INIT, WARN, ("ipv6 is not avaliable.\n"));
 		u4NumIPv6 = 0;
 	} else {
-			struct inet6_ifaddr *ifa;
-		struct list_head *addr_list;
-		addr_list = &(((struct inet6_dev *)(prDev->ip6_ptr))->addr_list);
-		ifa = list_entry(addr_list->next, typeof (*ifa), if_list);
+		struct inet6_dev *idev = (struct inet6_dev *)prDev->ip6_ptr;
+		struct inet6_ifaddr *ifa;
 
-		// <6> copy the IPv6 address
-		kalMemCopy(ip6,&(ifa->addr.s6_addr[0]), sizeof (ip6));
-		DBGLOG(INIT, INFO, ("ipv6 is %d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d.%d\n",
-	            ip6[0],ip6[1],ip6[2],ip6[3],
-	            ip6[4],ip6[5],ip6[6],ip6[7],
-	            ip6[8],ip6[9],ip6[10],ip6[11],
-	            ip6[12],ip6[13],ip6[14],ip6[15]
-	            ));
-
-		// todo: traverse between list to find whole sets of IPv6 addresses
-		for (i = 0; i < sizeof (ip6); i++) {
-			if (ip6[i] != 0)
-			{
-				u4NumIPv6 = 1;
+		/* Offload every address (link-local, stable and temporary global),
+		 * not only the newest: while the host sleeps the firmware drops
+		 * IPv6 traffic for addresses it doesn't know, e.g. the router's
+		 * neighbor advertisements to our link-local address. */
+		read_lock_bh(&idev->lock);
+		list_for_each_entry(ifa, &idev->addr_list, if_list) {
+			UINT_8 *a6 = &ifa->addr.s6_addr[0];
+			if (u4NumIPv6 >= WLAN_SUSPEND_MAX_IPV6)
 				break;
-			}
+			kalMemCopy(aucIp6[u4NumIPv6], a6, 16);
+			DBGLOG(INIT, INFO, ("ipv6[%u] is %02x%02x:%02x%02x:...:%02x%02x\n", u4NumIPv6,
+				a6[0], a6[1], a6[2], a6[3], a6[14], a6[15]));
+			u4NumIPv6++;
 		}
+		read_unlock_bh(&idev->lock);
 	}
 #endif
 
@@ -2882,20 +2880,18 @@ void wlanHandleSystemSuspend(void)
             prParamNetAddr->u2AddressType = PARAM_PROTOCOL_ID_TCP_IP;;
             prParamIpAddr = (P_PARAM_NETWORK_ADDRESS_IP)prParamNetAddr->aucAddress;
             kalMemCopy(&prParamIpAddr->in_addr, ip, sizeof(ip));
-            prParamNetAddr = (P_PARAM_NETWORK_ADDRESS)((ULONG)prParamNetAddr + prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress));
             u4Len += prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress);
+            prParamNetAddr = (P_PARAM_NETWORK_ADDRESS)((ULONG)prParamNetAddr + prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress));
 			DBGLOG(INIT, LOUD, ("prParamNetAddr:%p\n", prParamNetAddr));
         }
 #ifdef  CONFIG_IPV6
-		if (u4NumIPv6 > 0) {
-			DBGLOG(INIT, LOUD, ("prParamNetAddr:%p\n", prParamNetAddr));
+		for (i = 0; i < u4NumIPv6; i++) {
 			prParamNetAddr->u2AddressType = PARAM_PROTOCOL_ID_TCP_IP;
 			prParamNetAddr->u2AddressLength = sizeof (PARAM_NETWORK_ADDRESS_IPV6);
 			prParamIpv6Addr = (P_PARAM_NETWORK_ADDRESS_IPV6)prParamNetAddr->aucAddress;
-			kalMemCopy(prParamIpv6Addr->addr, ip6, sizeof (ip6));
+			kalMemCopy(prParamIpv6Addr->addr, aucIp6[i], 16);
+			u4Len += prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress);
 			prParamNetAddr = (P_PARAM_NETWORK_ADDRESS)((ULONG)prParamNetAddr + prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress));
-            u4Len += prParamNetAddr->u2AddressLength + OFFSET_OF(PARAM_NETWORK_ADDRESS, aucAddress);
-			DBGLOG(INIT, LOUD, ("prParamIpv6Addr:%p\n", prParamIpv6Addr));
 		}
 #endif
         ASSERT(u4Len <= sizeof(g_aucBufIpAddr/*aucBuf*/));
@@ -3003,14 +2999,17 @@ void wlanHandleSystemResume(void)
     if(!(prDev->ip_ptr)||\
         !((struct in_device *)(prDev->ip_ptr))->ifa_list||\
         !(&(((struct in_device *)(prDev->ip_ptr))->ifa_list->ifa_local))){
+        /* Still clear the filters below. Android leaves suspend mode when it
+         * reconnects, before DHCP; skipping here kept the suspend-time
+         * address filter active with the screen on, so IPv6 neighbor
+         * discovery to the router failed and Wi-Fi reconnected every ~15 s. */
         DBGLOG(INIT, INFO, ("ip is not avaliable.\n"));
-		goto notify_resume;
+    } else {
+        // <4> copy the IPv4 address
+        kalMemCopy(ip, &(((struct in_device *)(prDev->ip_ptr))->ifa_list->ifa_local), sizeof(ip));
+        DBGLOG(INIT, INFO, ("ip is %d.%d.%d.%d\n",
+                ip[0],ip[1],ip[2],ip[3]));
     }
-
-    // <4> copy the IPv4 address
-    kalMemCopy(ip, &(((struct in_device *)(prDev->ip_ptr))->ifa_list->ifa_local), sizeof(ip));
-    DBGLOG(INIT, INFO, ("ip is %d.%d.%d.%d\n",
-            ip[0],ip[1],ip[2],ip[3]));
 
 #ifdef  CONFIG_IPV6
 // <5> get the IPv6 address
@@ -3036,7 +3035,6 @@ void wlanHandleSystemResume(void)
 #endif
     // <7> clear the ARP filter
     {
-        WLAN_STATUS rStatus = WLAN_STATUS_FAILURE;
         UINT_32 u4SetInfoLen = 0;
         UINT_32 u4Len = sizeof(PARAM_NETWORK_ADDRESS_LIST);
         P_PARAM_NETWORK_ADDRESS_LIST prParamNetAddrList = (P_PARAM_NETWORK_ADDRESS_LIST)g_aucBufIpAddr;//aucBuf;
@@ -3078,7 +3076,6 @@ void wlanHandleSystemResume(void)
 #endif
     }
 
-notify_resume:
 	if (rStatus != WLAN_STATUS_SUCCESS) {
 		DBGLOG(INIT, WARN, ("set HW pattern filter fail 0x%x\n", rStatus));
 		wlanNotifyFwSuspend(prGlueInfo, FALSE);
